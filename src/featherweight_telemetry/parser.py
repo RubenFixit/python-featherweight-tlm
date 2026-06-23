@@ -2,27 +2,37 @@
 Parser for Featherweight GPS Tracker V2 ground station USB serial output.
 
 Input:  a single text line (trailing newline already stripped or not — both work).
-Output: GPSPacket, LinkPacket, UnknownPacket, or None.
+Output: GPSPacket, LinkPacket, TXStatPacket, BattBLEPacket, EventPacket,
+        UnknownPacket, or None.
 
 None means the line is silently discarded:
   - blank / whitespace-only
   - binary FWT packets from the LoRa microcontroller
   - non-@ lines (build info, separator lines, etc.)
 
-An UnknownPacket is returned for any @-prefixed line that did not match a
+An UnknownPacket is returned for any @-prefixed line that did not match any
 known type, so callers always have the raw text for debugging.
 
 Protocol reference: Featherweight GPS Tracker User's Manual, Feb 2025, Appendix A.
 
 Line formats (simplified):
+
   @ GPS_STAT <len> <year> <month> <date> <time> CRC_OK|CRC_ERR <unit_type> <tracker_id>
       Alt <alt_ft> lt <lat> ln <lon> Vel <h_vel> <heading> <v_vel>
-      Fix <fix_type> # <sat_total> <sat_24db> <sat_32db> <sat_40db> [satellite triplets] CRC: XXXX
+      Fix <fix_type> # <sat_total> <sat_24db> <sat_32db> <sat_40db> [...] CRC: XXXX
 
   @ RX_NOMTK <len> <year> <month> <date> <time> CRC_OK|CRC_ERR Rx NomTrk <tracker_id>
       PkRx <pkt_rx> PkTx <pkt_tx> RSSI <gs_rssi> SNR <gs_snr>
       AckRx <ack_rx> AckTx <ack_tx> RSSI <trk_rssi> SNR <trk_snr>
       SF <lora_sf> frq <frequency_hz> trk_B_V <battery_mv> [<relay_temp_c> C] CRC: XXXX
+
+  @ TX_STAT <len> <year> <month> <date> <time>
+      Tx Apid <apid> Tx dur: <duration_ms> msec. SF<lora_sf> Freq <frequency_hz> CRC: XXXX
+
+  @ BATT_BLE <len> <year> <month> <date> <time>
+      <battery_mv> BLE+|- <temperature_c> degC CRC: XXXX [XXXX]
+
+  @ <KNOWN_EVENT> <len> <year> <month> <date> <time> <payload...>
 
 Tolerances handled:
   - Positive integers may or may not carry a leading '+' (firmware variation)
@@ -38,11 +48,14 @@ import re
 
 from .models import (
     AnyPacket,
+    BattBLEPacket,
     DeviceType,
+    EventPacket,
     FixType,
     GPSPacket,
     LinkPacket,
     PacketType,
+    TXStatPacket,
     UnitType,
     UnknownPacket,
 )
@@ -51,9 +64,6 @@ from .models import (
 # Compiled regex patterns
 # ---------------------------------------------------------------------------
 
-# Common header prefix shared by all @ lines:
-#   @ <TYPE> <len> <year> <month> <date> <time> CRC_OK|CRC_ERR ...
-#
 # GPS_STAT capture groups:
 #  1=year 2=month 3=date 4=time  5=unit_type  6=tracker_id
 #  7=altitude_ft  8=latitude  9=longitude
@@ -114,6 +124,70 @@ _RX_NOMTK_RE = re.compile(
     re.VERBOSE,
 )
 
+# TX_STAT capture groups:
+#  1=year 2=month 3=date 4=time
+#  5=apid  6=tx_duration_ms  7=lora_sf  8=frequency_hz
+#
+# Sample: @ TX_STAT 91 2019 11 27 00:16:49.800 Tx Apid 11 Tx dur: 371 msec. SF12 Freq 926800000 CRC: B4E3
+_TX_STAT_RE = re.compile(
+    r"""
+    \A@ \s* TX_STAT \s+ \S+ \s+              # sync + type + packet-length
+    (\d+) \s+ (\d+) \s+ (\d+) \s+           # year  month  date
+    ([\d:.eE+\-]+) \s+                       # time
+    Tx \s+ Apid \s+ (\S+) \s+               # antenna/tracker apid token
+    Tx \s+ dur: \s+ (\d+) \s+ msec\. \s+   # on-air duration, ms
+    SF(\d+) \s+                              # LoRa spreading factor (no space before digit)
+    Freq \s+ (\d+)                           # center frequency, Hz
+    """,
+    re.VERBOSE,
+)
+
+# BATT_BLE capture groups:
+#  1=year 2=month 3=date 4=time
+#  5=battery_mv  6=ble_status ("BLE+" or "BLE-")  7=temperature_c
+#
+# Sample: @ BATT_BLE 68 2020 5 17 0.176433519 4189 BLE+ 36 degC CRC: 3176 6C19
+_BATT_BLE_RE = re.compile(
+    r"""
+    \A@ \s* BATT_BLE \s+ \S+ \s+            # sync + type + packet-length
+    (\d+) \s+ (\d+) \s+ (\d+) \s+           # year  month  date
+    ([\d:.eE+\-]+) \s+                       # time (bare float common pre-GPS-lock)
+    (\d+) \s+                                # ground station battery, mV
+    (BLE[+-]) \s+                            # BLE state: BLE+ (connected) or BLE- (off/disconnected)
+    ([+-]?\d+) \s+ degC                      # board temperature, degrees C
+    """,
+    re.VERBOSE,
+)
+
+# Generic event-header pattern for known-but-not-yet-fully-decoded packet types.
+# Captures the common header (type name, date, time) plus the raw payload.
+#
+# Capture groups:  1=event_name  2=year  3=month  4=date  5=time  6=payload
+_EVENT_HEADER_RE = re.compile(
+    r"""
+    \A@ \s* (\w+) \s+ \S+ \s+               # event type name + packet-length
+    (\d+) \s+ (\d+) \s+ (\d+) \s+           # year  month  date
+    ([\d:.eE+\-]+) \s*                       # time
+    (.*)                                     # raw payload — TODO parse per type
+    """,
+    re.VERBOSE | re.DOTALL,
+)
+
+# Known packet type names whose payload format is not yet fully decoded.
+# These yield EventPacket (header parsed) rather than UnknownPacket (raw only).
+# TODO: promote each to a dedicated dataclass once sample lines are validated.
+_KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
+    "FRST_FIX",   # first GPS fix after power-on
+    "RX_TMOUT",   # receive timeout — no tracker packet heard in window
+    "RLY_DIST",   # relay-node distance report
+    "RX_FOUND",   # tracker found (lost-rocket search mode)
+    "RX_COORD",   # coordinate received from tracker
+    "RX_CRDFD",   # coordinate confirmed / acknowledged
+    "GS_COORD",   # ground station coordinate broadcast
+    "COORDFND",   # coordinate found
+    "FS_CHNGE",   # frequency or spreading-factor change
+})
+
 _UNIT_TYPE_MAP: dict[str, UnitType] = {
     "TRK": UnitType.TRK,
     "GS": UnitType.GS,
@@ -148,7 +222,8 @@ class GPSTrackerParser:
         Parse one text line from the ground station serial stream.
 
         Returns:
-            GPSPacket, LinkPacket, or UnknownPacket on success.
+            GPSPacket, LinkPacket, TXStatPacket, BattBLEPacket, EventPacket,
+            or UnknownPacket on a parseable @ line.
             None if the line should be silently discarded (blank, binary, non-@).
         """
         if not line:
@@ -174,8 +249,19 @@ class GPSTrackerParser:
         if m:
             return self._parse_rx_nomtk(stripped, m)
 
-        # Known unimplemented types: TX_STAT FRST_FIX RX_TMOUT RLY_DIST
-        # RX_FOUND RX_COORD RX_CRDFD GS_COORD COORDFND FS_CHNGE BATT_BLE
+        m = _TX_STAT_RE.match(stripped)
+        if m:
+            return self._parse_tx_stat(stripped, m)
+
+        m = _BATT_BLE_RE.match(stripped)
+        if m:
+            return self._parse_batt_ble(stripped, m)
+
+        # Known event types: parse the common header, preserve raw payload.
+        em = _EVENT_HEADER_RE.match(stripped)
+        if em and em.group(1) in _KNOWN_EVENT_TYPES:
+            return self._parse_event(stripped, em)
+
         return UnknownPacket(raw_line=stripped)
 
     # ------------------------------------------------------------------
@@ -231,6 +317,48 @@ class GPSTrackerParser:
             relay_temp_c=relay_temp,
         )
 
+    def _parse_tx_stat(self, raw: str, m: re.Match) -> TXStatPacket:  # type: ignore[type-arg]
+        return TXStatPacket(
+            raw_line=raw,
+            device_type=DeviceType.GPS_TRACKER_V2,
+            packet_type=PacketType.TX_STAT,
+            year=int(m.group(1)),
+            month=int(m.group(2)),
+            date=int(m.group(3)),
+            uptime_s=_parse_time(m.group(4)),
+            apid=m.group(5),
+            tx_duration_ms=int(m.group(6)),
+            lora_sf=int(m.group(7)),
+            frequency_hz=int(m.group(8)),
+        )
+
+    def _parse_batt_ble(self, raw: str, m: re.Match) -> BattBLEPacket:  # type: ignore[type-arg]
+        return BattBLEPacket(
+            raw_line=raw,
+            device_type=DeviceType.GPS_TRACKER_V2,
+            packet_type=PacketType.BATT_BLE,
+            year=int(m.group(1)),
+            month=int(m.group(2)),
+            date=int(m.group(3)),
+            uptime_s=_parse_time(m.group(4)),
+            battery_mv=int(m.group(5)),
+            ble_connected=m.group(6) == "BLE+",
+            temperature_c=int(m.group(7)),
+        )
+
+    def _parse_event(self, raw: str, m: re.Match) -> EventPacket:  # type: ignore[type-arg]
+        return EventPacket(
+            raw_line=raw,
+            device_type=DeviceType.GPS_TRACKER_V2,
+            packet_type=PacketType.EVENT,
+            event_name=m.group(1),
+            year=int(m.group(2)),
+            month=int(m.group(3)),
+            date=int(m.group(4)),
+            uptime_s=_parse_time(m.group(5)),
+            payload=m.group(6).strip(),
+        )
+
 
 def _parse_time(s: str) -> float:
     """
@@ -239,7 +367,7 @@ def _parse_time(s: str) -> float:
     Formats observed in firmware:
       HH:MM:SS.mmm  — GPS_STAT with GPS lock (most common)
       MM:SS.s       — some packet types using internal clock
-      SS.sss        — bare float seconds
+      SS.sss        — bare float seconds (common in BATT_BLE pre-GPS-lock)
       scientific    — firmware quirk; falls back to 0.0
     """
     if not s:

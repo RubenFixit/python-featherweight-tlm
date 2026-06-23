@@ -26,17 +26,31 @@ from pathlib import Path
 from typing import TextIO
 
 from .exceptions import ExportError
-from .models import AnyPacket, GPSPacket, LinkPacket
+from .models import (
+    AnyPacket,
+    BattBLEPacket,
+    EventPacket,
+    GPSPacket,
+    LinkPacket,
+    TXStatPacket,
+    UnknownPacket,
+)
 
 # ---------------------------------------------------------------------------
 # CSV
 # ---------------------------------------------------------------------------
 
-_GPS_FIELDS = [f.name for f in dataclasses.fields(GPSPacket)]
-_LINK_FIELDS = [f.name for f in dataclasses.fields(LinkPacket)]
-
-# All unique field names, GPS fields first, then any link-only fields.
-_ALL_FIELDS = _GPS_FIELDS + [f for f in _LINK_FIELDS if f not in _GPS_FIELDS]
+# Build the union of all field names across every packet type, preserving
+# insertion order so GPS fields come first (most informative for typical use).
+# New packet types added to models.py are picked up automatically.
+_PACKET_CLASSES = [GPSPacket, LinkPacket, TXStatPacket, BattBLEPacket, EventPacket, UnknownPacket]
+_ALL_FIELDS: list[str] = list(
+    dict.fromkeys(
+        f.name
+        for cls in _PACKET_CLASSES
+        for f in dataclasses.fields(cls)  # type: ignore[arg-type]
+    )
+)
 
 
 def _packet_to_row(packet: AnyPacket) -> dict[str, object]:

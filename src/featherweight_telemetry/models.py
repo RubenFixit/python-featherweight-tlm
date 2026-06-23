@@ -7,9 +7,12 @@ Protocol reference: Featherweight GPS Tracker User's Manual, Feb 2025, Appendix 
 Serial settings: 115200 baud, 8N1, no flow control, V2 ground station USB only.
 
 Packet types produced by the USB ground station serial stream:
-  GPS_STAT   → GPSPacket       (position, velocity, fix state, satellites)
-  RX_NOMTK   → LinkPacket      (RF link quality, packet counters, battery)
-  anything   → UnknownPacket   (raw line preserved; not a crash)
+  GPS_STAT   → GPSPacket        (position, velocity, fix state, satellites)
+  RX_NOMTK   → LinkPacket       (RF link quality, packet counters, tracker battery)
+  TX_STAT    → TXStatPacket     (per-transmission LoRa radio parameters)
+  BATT_BLE   → BattBLEPacket    (ground station battery and BLE connection)
+  known type → EventPacket      (header parsed; payload preserved pending sample data)
+  anything   → UnknownPacket    (raw line preserved; never a crash)
 
 Field units match the manual:
   altitude    – feet above sea level
@@ -39,7 +42,10 @@ class DeviceType(IntEnum):
 class PacketType(IntEnum):
     GPS_STATUS = 1
     LINK_STATUS = 2
-    UNKNOWN = 255
+    TX_STAT = 3
+    BATT_BLE = 4
+    EVENT = 5       # known type whose payload is not yet fully decoded
+    UNKNOWN = 255   # truly unrecognised @ line
 
 
 class UnitType(IntEnum):
@@ -164,7 +170,7 @@ class LinkPacket(BasePacket):
     frequency_hz: int = 0     # center frequency, Hz
 
     # Power
-    battery_mv: int = 0       # millivolts; divide by 1000 for volts
+    battery_mv: int = 0       # tracker battery, millivolts; divide by 1000 for volts
 
     # Relay (0 when not a relay-forwarded packet)
     relay_temp_c: int = 0
@@ -180,18 +186,110 @@ class LinkPacket(BasePacket):
 
 
 @dataclass
+class TXStatPacket(BasePacket):
+    """
+    Parsed TX_STAT line from the Featherweight GPS Tracker ground station.
+
+    Emitted after each LoRa uplink transmission reporting the radio parameters used.
+    Useful for verifying which spreading factor and frequency the radio selected.
+
+    Sample line (from reference repo spec, firmware Nov 2019):
+      @ TX_STAT 91 2019 11 27 00:16:49.800 Tx Apid 11 Tx dur: 371 msec. SF12 Freq 926800000 CRC: B4E3
+
+    TODO: Validate 'apid' semantics — appears to be an antenna/tracker identifier integer.
+    """
+
+    packet_type: PacketType = PacketType.TX_STAT
+
+    year: int = 0
+    month: int = 0
+    date: int = 0
+    uptime_s: float = 0.0
+
+    apid: str = ""           # antenna / tracker ID token (e.g. "11")
+    tx_duration_ms: int = 0  # on-air duration of the transmission, milliseconds
+    lora_sf: int = 0         # LoRa spreading factor used (7–12)
+    frequency_hz: int = 0    # center frequency, Hz
+
+
+@dataclass
+class BattBLEPacket(BasePacket):
+    """
+    Parsed BATT_BLE line from the Featherweight GPS Tracker ground station.
+
+    Reports the GROUND STATION's own battery voltage and Bluetooth LE state.
+    (The tracker's battery is in LinkPacket.battery_mv.)
+
+    Sample line (from reference repo spec, firmware May 2020):
+      @ BATT_BLE 68 2020 5 17 0.176433519 4189 BLE+ 36 degC CRC: 3176 6C19
+
+    TODO: Validate BLE state strings — only "BLE+" has been observed.
+          "BLE-" (disconnected) is assumed by analogy.
+    TODO: Clarify the two-token CRC field seen in the sample (CRC: 3176 6C19).
+    """
+
+    packet_type: PacketType = PacketType.BATT_BLE
+
+    year: int = 0
+    month: int = 0
+    date: int = 0
+    uptime_s: float = 0.0
+
+    battery_mv: int = 0        # ground station battery, millivolts
+    ble_connected: bool = False # True when "BLE+"; False when "BLE-"
+    temperature_c: int = 0     # ground station board temperature, degrees C
+
+    @property
+    def battery_v(self) -> float:
+        return self.battery_mv / 1000.0
+
+
+@dataclass
+class EventPacket(BasePacket):
+    """
+    Header-parsed stub for known @ packet types that lack sample data.
+
+    The common header fields (year/month/date/uptime_s) are extracted from
+    every @ line; the remaining payload is preserved verbatim in ``payload``
+    for future full parsing once real sample lines are available.
+
+    Known types that currently map here:
+      FRST_FIX  — first GPS fix after power-on
+      RX_TMOUT  — receive timeout (no tracker packet heard within window)
+      RLY_DIST  — relay-node distance report
+      RX_FOUND  — tracker found (lost-rocket mode)
+      RX_COORD  — coordinate received
+      RX_CRDFD  — coordinate confirmed/acknowledged
+      GS_COORD  — ground station coordinate broadcast
+      COORDFND  — coordinate found
+      FS_CHNGE  — frequency or spreading-factor change
+
+    TODO: Add a dedicated dataclass for each type once sample lines are captured
+          from real V2 hardware and the payload structure is confirmed.
+    """
+
+    packet_type: PacketType = PacketType.EVENT
+
+    event_name: str = ""  # raw type string, e.g. "FRST_FIX"
+    year: int = 0
+    month: int = 0
+    date: int = 0
+    uptime_s: float = 0.0
+    payload: str = ""     # everything after the time field, TODO fully parse
+
+
+@dataclass
 class UnknownPacket(BasePacket):
     """
-    Any @ line that did not match GPS_STAT or RX_NOMTK, plus any line that
-    caused an unexpected parse error.
+    Any @ line that did not match any known packet type.
 
-    Known line types that fall here (not yet parsed):
-      TX_STAT, FRST_FIX, RX_TMOUT, RLY_DIST, RX_FOUND,
-      RX_COORD, RX_CRDFD, GS_COORD, COORDFND, FS_CHNGE, BATT_BLE
+    The raw line is preserved so callers can log or inspect it without crashing.
+    If you see a type here regularly, consider adding it to EventPacket's known
+    list or implementing a full parser for it.
     """
 
     packet_type: PacketType = PacketType.UNKNOWN
 
 
 # Type alias used throughout the library
-AnyPacket = GPSPacket | LinkPacket | UnknownPacket
+AnyPacket = GPSPacket | LinkPacket | TXStatPacket | BattBLEPacket | EventPacket | UnknownPacket

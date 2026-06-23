@@ -31,11 +31,14 @@ from .gps_tracker import GPSTracker
 from .models import (
     AnyPacket,
     BasePacket,
+    BattBLEPacket,
     DeviceType,
+    EventPacket,
     FixType,
     GPSPacket,
     LinkPacket,
     PacketType,
+    TXStatPacket,
     UnitType,
     UnknownPacket,
 )
@@ -52,13 +55,16 @@ __all__ = [
     # Models
     "AnyPacket",
     "BasePacket",
+    "BattBLEPacket",
     "DeviceType",
+    "EventPacket",
     "FixType",
     "GPSPacket",
     "LinkPacket",
     "PacketType",
-    "UnknownPacket",
+    "TXStatPacket",
     "UnitType",
+    "UnknownPacket",
     # I/O
     "list_ports",
     "list_ports_detail",

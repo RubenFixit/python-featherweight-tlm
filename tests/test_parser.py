@@ -12,10 +12,13 @@ import pytest
 
 from featherweight_telemetry import GPSTrackerParser
 from featherweight_telemetry.models import (
+    BattBLEPacket,
+    EventPacket,
     FixType,
     GPSPacket,
     LinkPacket,
     PacketType,
+    TXStatPacket,
     UnitType,
     UnknownPacket,
 )
@@ -52,6 +55,21 @@ RX_NOMTK_NO_TEMP = (
     "RSSI -099 SNR -10 SF 10 frq 919000000 trk_B_V 4098 CRC: EFD0"
 )
 
+# From the reference repo spec (firmware Nov 2019)
+MANUAL_TX_STAT = (
+    "@ TX_STAT 91 2019 11 27 00:16:49.800 Tx Apid 11 Tx dur: 371 msec. SF12 Freq 926800000 CRC: B4E3"
+)
+
+# From the reference repo spec (firmware May 2020)
+MANUAL_BATT_BLE = (
+    "@ BATT_BLE 68 2020 5 17 0.176433519 4189 BLE+ 36 degC CRC: 3176 6C19"
+)
+
+# TODO: Placeholder event lines — format not validated against real hardware.
+PLACEHOLDER_FRST_FIX = "@ FRST_FIX 50 2020 11 15 01:18:44.000 Fix acquired CRC: AAAA"
+PLACEHOLDER_RX_TMOUT = "@ RX_TMOUT 50 2020 11 15 01:19:00.000 No packet received CRC: BBBB"
+PLACEHOLDER_FS_CHNGE = "@ FS_CHNGE 60 2020 11 15 01:19:30.000 SF9 Freq 915000000 CRC: CCCC"
+
 
 @pytest.fixture
 def parser() -> GPSTrackerParser:
@@ -83,27 +101,27 @@ class TestDiscardedLines:
 
 
 # ---------------------------------------------------------------------------
-# UnknownPacket for unrecognised @ lines
+# UnknownPacket — truly unrecognised @ lines
 # ---------------------------------------------------------------------------
 
 class TestUnknownPacket:
-    def test_tx_stat_returns_unknown(self, parser: GPSTrackerParser) -> None:
-        line = "@ TX_STAT 91 2019 11 27 00:16:49.800 Tx Apid 11 SF12 CRC: B4E3"
+    def test_completely_unknown_type_returns_unknown(self, parser: GPSTrackerParser) -> None:
+        line = "@ FOOBAR 99 2020 1 1 0.0 some payload CRC: 1234"
         result = parser.parse_line(line)
-        assert result is not None
         assert isinstance(result, UnknownPacket)
         assert result.packet_type == PacketType.UNKNOWN
 
-    def test_batt_ble_returns_unknown(self, parser: GPSTrackerParser) -> None:
-        line = "@ BATT_BLE 68 2020 5 17 0.176433519 4189 BLE+ 36 degC CRC: 3176 6C19"
-        result = parser.parse_line(line)
-        assert isinstance(result, UnknownPacket)
-
     def test_unknown_preserves_raw_line(self, parser: GPSTrackerParser) -> None:
-        line = "@ TX_STAT 91 2019 11 27 00:16:49.800 SF12 CRC: B4E3"
+        line = "@ FOOBAR 99 2020 1 1 0.0 something CRC: 1234"
         result = parser.parse_line(line)
         assert isinstance(result, UnknownPacket)
-        assert "TX_STAT" in result.raw_line
+        assert "FOOBAR" in result.raw_line
+
+    def test_truncated_tx_stat_is_unknown(self, parser: GPSTrackerParser) -> None:
+        # TX_STAT missing Tx dur and Freq fields — falls through to Unknown
+        line = "@ TX_STAT 91 2019 11 27 00:16:49.800 Tx Apid 11 SF12 CRC: B4E3"
+        result = parser.parse_line(line)
+        assert isinstance(result, UnknownPacket)
 
 
 # ---------------------------------------------------------------------------
@@ -267,6 +285,147 @@ class TestRxNomtkNoTemp:
 
 
 # ---------------------------------------------------------------------------
+# TX_STAT
+# ---------------------------------------------------------------------------
+
+class TestTXStat:
+    @pytest.fixture
+    def packet(self, parser: GPSTrackerParser) -> TXStatPacket:
+        result = parser.parse_line(MANUAL_TX_STAT)
+        assert isinstance(result, TXStatPacket)
+        return result
+
+    def test_packet_type(self, packet: TXStatPacket) -> None:
+        assert packet.packet_type == PacketType.TX_STAT
+
+    def test_utc_date(self, packet: TXStatPacket) -> None:
+        assert packet.year == 2019
+        assert packet.month == 11
+        assert packet.date == 27
+
+    def test_uptime_seconds(self, packet: TXStatPacket) -> None:
+        # 00:16:49.800 → 16*60 + 49.800 = 1009.800
+        assert abs(packet.uptime_s - 1009.800) < 0.001
+
+    def test_apid(self, packet: TXStatPacket) -> None:
+        assert packet.apid == "11"
+
+    def test_tx_duration(self, packet: TXStatPacket) -> None:
+        assert packet.tx_duration_ms == 371
+
+    def test_lora_sf(self, packet: TXStatPacket) -> None:
+        assert packet.lora_sf == 12
+
+    def test_frequency(self, packet: TXStatPacket) -> None:
+        assert packet.frequency_hz == 926_800_000
+
+    def test_raw_line_preserved(self, packet: TXStatPacket) -> None:
+        assert "TX_STAT" in packet.raw_line
+
+
+# ---------------------------------------------------------------------------
+# BATT_BLE
+# ---------------------------------------------------------------------------
+
+class TestBattBLE:
+    @pytest.fixture
+    def packet(self, parser: GPSTrackerParser) -> BattBLEPacket:
+        result = parser.parse_line(MANUAL_BATT_BLE)
+        assert isinstance(result, BattBLEPacket)
+        return result
+
+    def test_packet_type(self, packet: BattBLEPacket) -> None:
+        assert packet.packet_type == PacketType.BATT_BLE
+
+    def test_utc_date(self, packet: BattBLEPacket) -> None:
+        assert packet.year == 2020
+        assert packet.month == 5
+        assert packet.date == 17
+
+    def test_uptime_bare_float(self, packet: BattBLEPacket) -> None:
+        assert abs(packet.uptime_s - 0.176433519) < 1e-7
+
+    def test_ground_station_battery_mv(self, packet: BattBLEPacket) -> None:
+        assert packet.battery_mv == 4189
+
+    def test_battery_v_property(self, packet: BattBLEPacket) -> None:
+        assert abs(packet.battery_v - 4.189) < 0.001
+
+    def test_ble_connected_true(self, packet: BattBLEPacket) -> None:
+        assert packet.ble_connected is True
+
+    def test_temperature(self, packet: BattBLEPacket) -> None:
+        assert packet.temperature_c == 36
+
+    def test_ble_disconnected(self, parser: GPSTrackerParser) -> None:
+        line = "@ BATT_BLE 68 2020 5 17 1.5 3900 BLE- 35 degC CRC: AABB"
+        result = parser.parse_line(line)
+        assert isinstance(result, BattBLEPacket)
+        assert result.ble_connected is False
+        assert result.battery_mv == 3900
+
+    def test_raw_line_preserved(self, packet: BattBLEPacket) -> None:
+        assert "BATT_BLE" in packet.raw_line
+
+
+# ---------------------------------------------------------------------------
+# EventPacket — known types with header parsed, payload preserved
+# ---------------------------------------------------------------------------
+
+class TestEventPacket:
+    def test_frst_fix_returns_event(self, parser: GPSTrackerParser) -> None:
+        result = parser.parse_line(PLACEHOLDER_FRST_FIX)
+        assert isinstance(result, EventPacket)
+        assert result.packet_type == PacketType.EVENT
+
+    def test_event_name_extracted(self, parser: GPSTrackerParser) -> None:
+        result = parser.parse_line(PLACEHOLDER_FRST_FIX)
+        assert isinstance(result, EventPacket)
+        assert result.event_name == "FRST_FIX"
+
+    def test_event_date_extracted(self, parser: GPSTrackerParser) -> None:
+        result = parser.parse_line(PLACEHOLDER_FRST_FIX)
+        assert isinstance(result, EventPacket)
+        assert result.year == 2020
+        assert result.month == 11
+        assert result.date == 15
+
+    def test_event_uptime_extracted(self, parser: GPSTrackerParser) -> None:
+        # 01:18:44.000 → 1*3600 + 18*60 + 44.0 = 4724.0
+        result = parser.parse_line(PLACEHOLDER_FRST_FIX)
+        assert isinstance(result, EventPacket)
+        assert abs(result.uptime_s - 4724.0) < 0.001
+
+    def test_event_payload_preserved(self, parser: GPSTrackerParser) -> None:
+        result = parser.parse_line(PLACEHOLDER_FRST_FIX)
+        assert isinstance(result, EventPacket)
+        assert "Fix acquired" in result.payload
+
+    def test_rx_tmout_event(self, parser: GPSTrackerParser) -> None:
+        result = parser.parse_line(PLACEHOLDER_RX_TMOUT)
+        assert isinstance(result, EventPacket)
+        assert result.event_name == "RX_TMOUT"
+
+    def test_fs_chnge_event(self, parser: GPSTrackerParser) -> None:
+        result = parser.parse_line(PLACEHOLDER_FS_CHNGE)
+        assert isinstance(result, EventPacket)
+        assert result.event_name == "FS_CHNGE"
+
+    def test_all_nine_known_event_types_yield_event_packet(
+        self, parser: GPSTrackerParser
+    ) -> None:
+        known_types = [
+            "FRST_FIX", "RX_TMOUT", "RLY_DIST", "RX_FOUND",
+            "RX_COORD", "RX_CRDFD", "GS_COORD", "COORDFND", "FS_CHNGE",
+        ]
+        for name in known_types:
+            line = f"@ {name} 50 2020 1 1 0.0 payload CRC: 1234"
+            result = parser.parse_line(line)
+            assert isinstance(result, EventPacket), f"{name} should yield EventPacket"
+            assert result.event_name == name
+
+
+# ---------------------------------------------------------------------------
 # Time parsing (tested via parse_line)
 # ---------------------------------------------------------------------------
 
@@ -281,6 +440,11 @@ class TestTimeParsing:
         result = parser.parse_line(MANUAL_RX_NOMTK)
         assert isinstance(result, LinkPacket)
         assert abs(result.uptime_s - 3056.9) < 0.01
+
+    def test_bare_float_format(self, parser: GPSTrackerParser) -> None:
+        result = parser.parse_line(MANUAL_BATT_BLE)
+        assert isinstance(result, BattBLEPacket)
+        assert abs(result.uptime_s - 0.176433519) < 1e-7
 
     def test_trailing_newline_handled(self, parser: GPSTrackerParser) -> None:
         result = parser.parse_line(MANUAL_GPS_STAT + "\n")

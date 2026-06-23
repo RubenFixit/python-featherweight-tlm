@@ -9,7 +9,7 @@ import pytest
 
 from featherweight_telemetry import export_csv, export_jsonl, replay, replay_raw
 from featherweight_telemetry.exceptions import ReplayError
-from featherweight_telemetry.models import GPSPacket, LinkPacket, UnknownPacket
+from featherweight_telemetry.models import GPSPacket, LinkPacket
 
 SAMPLE_LOG = Path(__file__).parent / "data" / "sample_gps_tracker.log"
 
@@ -25,10 +25,14 @@ class TestReplay:
         assert GPSPacket in types
         assert LinkPacket in types
 
-    def test_replay_yields_unknown_for_unrecognised_at_lines(self) -> None:
+    def test_replay_yields_diverse_packet_types(self) -> None:
+        from featherweight_telemetry.models import BattBLEPacket, EventPacket, TXStatPacket
+
         packets = list(replay(SAMPLE_LOG))
-        unknowns = [p for p in packets if isinstance(p, UnknownPacket)]
-        assert len(unknowns) >= 1  # TX_STAT and BATT_BLE in sample log
+        types = {type(p) for p in packets}
+        assert TXStatPacket in types
+        assert BattBLEPacket in types
+        assert EventPacket in types
 
     def test_replay_missing_file_raises(self) -> None:
         with pytest.raises(ReplayError):
