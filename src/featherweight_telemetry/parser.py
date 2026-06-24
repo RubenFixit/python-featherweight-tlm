@@ -168,14 +168,14 @@ _EVENT_HEADER_RE = re.compile(
     \A@ \s* (\w+) \s+ \S+ \s+               # event type name + packet-length
     (\d+) \s+ (\d+) \s+ (\d+) \s+           # year  month  date
     ([\d:.eE+\-]+) \s*                       # time
-    (.*)                                     # raw payload — TODO parse per type
+    (.*)                                     # raw payload (verbatim; per-type parsing deferred)
     """,
     re.VERBOSE | re.DOTALL,
 )
 
 # Known packet type names whose payload format is not yet fully decoded.
 # These yield EventPacket (header parsed) rather than UnknownPacket (raw only).
-# TODO: promote each to a dedicated dataclass once sample lines are validated.
+# Per-type dataclasses are deferred until real hardware sample lines are available.
 _KNOWN_EVENT_TYPES: frozenset[str] = frozenset({
     "FRST_FIX",   # first GPS fix after power-on
     "RX_TMOUT",   # receive timeout — no tracker packet heard in window

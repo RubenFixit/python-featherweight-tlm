@@ -274,8 +274,8 @@ class EventPacket(BasePacket):
       COORDFND  — coordinate found
       FS_CHNGE  — frequency or spreading-factor change
 
-    TODO: Add a dedicated dataclass for each type once sample lines are captured
-          from real V2 hardware and the payload structure is confirmed.
+    Per-type payload parsing is deferred until sample lines from real V2 hardware
+    are available to validate field positions and formats.
     """
 
     packet_type: PacketType = PacketType.EVENT
@@ -285,7 +285,7 @@ class EventPacket(BasePacket):
     month: int = 0
     date: int = 0
     uptime_s: float = 0.0
-    payload: str = ""     # everything after the time field, TODO fully parse
+    payload: str = ""     # everything after the time field (verbatim)
 
 
 @dataclass
