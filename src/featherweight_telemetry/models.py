@@ -3,10 +3,10 @@ Data models for Featherweight telemetry packets.
 
 All packets are plain dataclasses — no Pydantic, no heavy dependencies.
 
-Protocol reference: Featherweight GPS Tracker User's Manual, Feb 2025, Appendix A.
-Serial settings: 115200 baud, 8N1, no flow control, V2 ground station USB only.
+Two separate USB serial devices are supported:
 
-Packet types produced by the USB ground station serial stream:
+GPS Tracker V2 (115200 8N1, V2 ground station USB):
+  Protocol reference: Featherweight GPS Tracker User's Manual, Feb 2025, Appendix A.
   GPS_STAT   → GPSPacket        (position, velocity, fix state, satellites)
   RX_NOMTK   → LinkPacket       (RF link quality, packet counters, tracker battery)
   TX_STAT    → TXStatPacket     (per-transmission LoRa radio parameters)
@@ -14,8 +14,13 @@ Packet types produced by the USB ground station serial stream:
   known type → EventPacket      (header parsed; payload preserved pending sample data)
   anything   → UnknownPacket    (raw line preserved; never a crash)
 
-Field units match the manual:
-  altitude    – feet above sea level
+Blue Raven altimeter (115200 8N1, direct USB):
+  Protocol reference: Blue Raven User's Guide, May 2026, Appendix A.
+  BLR_STAT   → BLRStatPacket    (live sensor status: accel, baro, gyro, AGL)
+  anything   → UnknownPacket    (raw line preserved; never a crash)
+
+Field units match the manuals:
+  altitude    – feet above sea level / AGL
   velocity    – feet per second
   heading     – degrees from North (may be negative; TODO validate sign convention)
   latitude    – decimal degrees, negative = South
@@ -25,6 +30,9 @@ Field units match the manual:
   frequency   – Hz
   battery     – millivolts (divide by 1000 for volts)
   temperature – degrees Celsius
+  acceleration – Gs
+  angular rate – degrees per second
+  pressure    – atmospheres
 """
 
 from __future__ import annotations
@@ -37,6 +45,7 @@ class DeviceType(IntEnum):
     """Source of the telemetry stream."""
 
     GPS_TRACKER_V2 = 1
+    BLUE_RAVEN = 2
 
 
 class PacketType(IntEnum):
@@ -45,6 +54,7 @@ class PacketType(IntEnum):
     TX_STAT = 3
     BATT_BLE = 4
     EVENT = 5       # known type whose payload is not yet fully decoded
+    BLR_STAT = 6    # Blue Raven live sensor status
     UNKNOWN = 255   # truly unrecognised @ line
 
 
@@ -291,5 +301,77 @@ class UnknownPacket(BasePacket):
     packet_type: PacketType = PacketType.UNKNOWN
 
 
-# Type alias used throughout the library
-AnyPacket = GPSPacket | LinkPacket | TXStatPacket | BattBLEPacket | EventPacket | UnknownPacket
+@dataclass
+class BLRStatPacket(BasePacket):
+    """
+    Parsed @ BLR_STAT line from the Featherweight Blue Raven altimeter USB port.
+
+    Emitted 5 times per second during normal operation.  Fields are already
+    converted to human-readable units (Gs, deg/sec, atm, etc.) — the raw
+    integer scale factors from the wire format are applied during parsing.
+
+    Protocol reference: Blue Raven User's Guide, May 2026, Appendix A.
+    Serial settings: 115200 baud, 8N1, no flow control, direct USB.
+
+    Wire format scaling (applied in parser, not stored):
+      HG  fields  ×100  → Gs
+      XYZ fields  ×1000 → Gs
+      Bo  pressure ×10000 → atm
+      Bo  temp     ×100   → °F
+      gy  fields  ×100  → deg/sec
+      ang tilt     ×10   → degrees
+    """
+
+    packet_type: PacketType = PacketType.BLR_STAT
+
+    # UTC date (0 before phone sets time over Bluetooth)
+    year: int = 0
+    month: int = 0
+    date: int = 0
+    uptime_s: float = 0.0
+
+    # Hi-G accelerometer (±400 G range), in Gs
+    hg_accel_x: float = 0.0
+    hg_accel_y: float = 0.0
+    hg_accel_z: float = 0.0
+
+    # Low-G accelerometer (±32 G range), in Gs
+    accel_x: float = 0.0
+    accel_y: float = 0.0
+    accel_z: float = 0.0
+
+    # Barometric sensor
+    baro_pres_atm: float = 0.0   # absolute pressure, atmospheres
+    baro_temp_f: float = 0.0     # board temperature, degrees Fahrenheit
+
+    # Power
+    battery_mv: int = 0          # battery voltage, millivolts
+
+    # Gyroscope, degrees per second
+    gyro_x: float = 0.0
+    gyro_y: float = 0.0
+    gyro_z: float = 0.0
+
+    # Attitude
+    tilt_deg: float = 0.0        # angle between rocket axis and vertical, degrees
+    roll_deg: float = 0.0        # integrated roll angle, degrees
+
+    # Flight data
+    vert_vel_fps: int = 0        # vertical velocity from inertial nav, ft/sec (up = positive)
+    agl_ft: int = 0              # altitude above ground level from baro, feet
+
+    @property
+    def battery_v(self) -> float:
+        return self.battery_mv / 1000.0
+
+    @property
+    def baro_temp_c(self) -> float:
+        """Board temperature in degrees Celsius."""
+        return (self.baro_temp_f - 32.0) * 5.0 / 9.0
+
+
+# Type alias used throughout the library — covers both GPS Tracker V2 and Blue Raven output
+AnyPacket = (
+    GPSPacket | LinkPacket | TXStatPacket | BattBLEPacket | EventPacket
+    | BLRStatPacket | UnknownPacket
+)

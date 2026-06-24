@@ -1,24 +1,34 @@
 """
 featherweight_telemetry — Python library for Featherweight Altimeters telemetry.
 
-v0.1 supports the Featherweight GPS Tracker V2 ground station USB serial stream,
-receive-only.  No commands are sent to the device.
+v0.1 supports two devices, both receive-only (no commands sent):
+  - GPS Tracker V2 ground station USB serial stream
+  - Blue Raven altimeter USB serial stream (direct connection)
 
-Quick start::
+Quick start — GPS Tracker::
 
     from featherweight_telemetry import GPSTracker
 
     for packet in GPSTracker(port="COM4").stream():
         print(packet)
 
+Quick start — Blue Raven::
+
+    from featherweight_telemetry import BlueRaven
+
+    for packet in BlueRaven(port="COM5").stream():
+        print(packet)
+
 Parser-only::
 
-    from featherweight_telemetry import GPSTrackerParser
+    from featherweight_telemetry import GPSTrackerParser, BlueRavenParser
 
-    parser = GPSTrackerParser()
-    packet = parser.parse_line(line)
+    gps_parser = GPSTrackerParser()
+    blr_parser = BlueRavenParser()
 """
 
+from .blueraven import BlueRaven
+from .blueraven_parser import BlueRavenParser
 from .exceptions import (
     ExportError,
     FeatherweightError,
@@ -32,6 +42,7 @@ from .models import (
     AnyPacket,
     BasePacket,
     BattBLEPacket,
+    BLRStatPacket,
     DeviceType,
     EventPacket,
     FixType,
@@ -49,13 +60,17 @@ from .serial_port import list_ports, list_ports_detail
 
 __version__ = "0.1.0"
 __all__ = [
-    # High-level API
+    # High-level API — GPS Tracker V2
     "GPSTracker",
     "GPSTrackerParser",
+    # High-level API — Blue Raven
+    "BlueRaven",
+    "BlueRavenParser",
     # Models
     "AnyPacket",
     "BasePacket",
     "BattBLEPacket",
+    "BLRStatPacket",
     "DeviceType",
     "EventPacket",
     "FixType",

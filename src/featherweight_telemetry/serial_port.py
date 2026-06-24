@@ -1,16 +1,23 @@
 """
-Serial port interface for the Featherweight GPS Tracker V2 ground station.
+Serial port interfaces for Featherweight altimetry hardware.
 
-Receive-only — this module never writes to the serial port.
-Serial settings: 115200 baud, 8N1, no flow control.
+All interfaces are receive-only — this module NEVER writes to any serial port.
+Serial settings for both devices: 115200 baud, 8N1, no flow control.
 
-Only V2 ground stations (sold from November 2020) have an active USB data port.
-The V1 micro-USB port is for charging only and will not emit data.
+GPS Tracker V2 ground station:
+  Only V2 ground stations (sold from November 2020) have an active USB data port.
+  The V1 micro-USB port is for charging only and will not emit data.
+  Typical port names:
+    Windows : COM4  (Device Manager → Ports → CP2102 or CH340)
+    Linux   : /dev/ttyUSB0  or  /dev/ttyACM0
+    macOS   : /dev/cu.usbserial-*  or  /dev/cu.SLAB_USBtoUART
 
-Typical port names by platform:
-  Windows : COM4  (check Device Manager → Ports → CP2102 or CH340)
-  Linux   : /dev/ttyUSB0  or  /dev/ttyACM0
-  macOS   : /dev/cu.usbserial-*  or  /dev/cu.SLAB_USBtoUART
+Blue Raven altimeter (direct USB):
+  Connects as a USB CDC serial device.
+  Typical port names:
+    Windows : COM5  (Device Manager → Ports → STM32 Virtual COM Port)
+    Linux   : /dev/ttyACM0
+    macOS   : /dev/cu.usbmodem*
 """
 
 from __future__ import annotations
@@ -20,6 +27,7 @@ from collections.abc import Generator
 import serial
 import serial.tools.list_ports
 
+from .blueraven_parser import BlueRavenParser
 from .exceptions import SerialConnectionError
 from .models import AnyPacket
 from .parser import GPSTrackerParser
@@ -137,6 +145,117 @@ class GPSTrackerSerial:
 
         Opens the port if not already open.  Stops cleanly on KeyboardInterrupt.
         """
+        if self._serial is None:
+            self.open()
+
+        assert self._serial is not None
+        try:
+            while True:
+                try:
+                    raw = self._serial.readline()
+                except serial.SerialException as exc:
+                    raise SerialConnectionError(f"Serial read error on {self.port}: {exc}") from exc
+
+                if not raw:
+                    continue
+
+                yield raw.decode("utf-8", errors="replace").rstrip("\r\n")
+
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.close()
+
+
+class BlueRavenSerial:
+    """
+    Receive-only serial reader for the Featherweight Blue Raven altimeter.
+
+    Connects directly to the Blue Raven's USB port (not via GPS Tracker GS).
+    Parses @ BLR_STAT live status packets emitted 5 times per second.
+
+    Example::
+
+        reader = BlueRavenSerial(port="/dev/ttyACM0")
+        for packet in reader.stream():
+            print(packet)
+    """
+
+    def __init__(
+        self,
+        port: str,
+        baudrate: int = DEFAULT_BAUDRATE,
+        timeout: float = DEFAULT_TIMEOUT,
+    ) -> None:
+        self.port = port
+        self.baudrate = baudrate
+        self.timeout = timeout
+        self._parser = BlueRavenParser()
+        self._serial: serial.Serial | None = None
+
+    def open(self) -> None:
+        """Open the serial port.  Raises SerialConnectionError on failure."""
+        try:
+            self._serial = serial.Serial(
+                port=self.port,
+                baudrate=self.baudrate,
+                bytesize=serial.EIGHTBITS,
+                parity=serial.PARITY_NONE,
+                stopbits=serial.STOPBITS_ONE,
+                timeout=self.timeout,
+                write_timeout=0,
+                xonxoff=False,
+                rtscts=False,
+                dsrdtr=False,
+            )
+        except serial.SerialException as exc:
+            raise SerialConnectionError(f"Cannot open {self.port}: {exc}") from exc
+
+    def close(self) -> None:
+        """Close the serial port if open."""
+        if self._serial and self._serial.is_open:
+            self._serial.close()
+
+    def __enter__(self) -> BlueRavenSerial:
+        self.open()
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
+
+    def stream(self) -> Generator[AnyPacket, None, None]:
+        """
+        Yield parsed packets from the Blue Raven indefinitely.
+
+        Opens the port if not already open.  Stops cleanly on KeyboardInterrupt
+        and always closes the port on exit.
+        """
+        if self._serial is None:
+            self.open()
+
+        assert self._serial is not None
+        try:
+            while True:
+                try:
+                    raw = self._serial.readline()
+                except serial.SerialException as exc:
+                    raise SerialConnectionError(f"Serial read error on {self.port}: {exc}") from exc
+
+                if not raw:
+                    continue
+
+                line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
+                packet = self._parser.parse_line(line)
+                if packet is not None:
+                    yield packet
+
+        except KeyboardInterrupt:
+            pass
+        finally:
+            self.close()
+
+    def stream_raw(self) -> Generator[str, None, None]:
+        """Yield raw decoded lines from the serial port.  Useful for recording."""
         if self._serial is None:
             self.open()
 

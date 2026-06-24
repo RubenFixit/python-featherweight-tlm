@@ -29,6 +29,7 @@ from .exceptions import ExportError
 from .models import (
     AnyPacket,
     BattBLEPacket,
+    BLRStatPacket,
     EventPacket,
     GPSPacket,
     LinkPacket,
@@ -43,7 +44,7 @@ from .models import (
 # Build the union of all field names across every packet type, preserving
 # insertion order so GPS fields come first (most informative for typical use).
 # New packet types added to models.py are picked up automatically.
-_PACKET_CLASSES = [GPSPacket, LinkPacket, TXStatPacket, BattBLEPacket, EventPacket, UnknownPacket]
+_PACKET_CLASSES = [GPSPacket, LinkPacket, TXStatPacket, BattBLEPacket, EventPacket, BLRStatPacket, UnknownPacket]
 _ALL_FIELDS: list[str] = list(
     dict.fromkeys(
         f.name
